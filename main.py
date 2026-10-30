@@ -5,7 +5,7 @@ import os
 import re
 import chardet
 from faker import Faker
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 # Configure logging
@@ -70,7 +70,11 @@ class DataFormatAnonymizer:
             date_str = match.group(0)
             try:
                 date_object = datetime.strptime(date_str, date_format)
-                timestamp = str(int(date_object.timestamp()))
+                # A bare date means midnight UTC here. Calling timestamp()
+                # on a naive datetime reads it in the host's local timezone,
+                # so the same file produced different timestamps on
+                # machines in different timezones.
+                timestamp = str(int(date_object.replace(tzinfo=timezone.utc).timestamp()))
                 return timestamp
             except ValueError:
                 self.logger.warning(f"Invalid date format encountered: {date_str}")  # Log invalid date format
@@ -99,7 +103,7 @@ class DataFormatAnonymizer:
     
     def email_to_fake(self):
          """Replaces email addresses with fake email addresses."""
-         email_regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b' #Basic email regex
+         email_regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b' #Basic email regex
          email_regex = self.config.get('email_regex', email_regex) #Override the default if provided
          def replace_email(match):
             return self.fake.email()
@@ -120,7 +124,10 @@ class DataFormatAnonymizer:
         address_regex = self.config.get('address_regex', address_regex)
 
         def replace_address(match):
-            return self.fake.address()
+            # Faker addresses contain a newline between the street and the
+            # city line. Inserted raw, one address splits the record it
+            # lands in across two lines, so the lines are joined first.
+            return self.fake.address().replace("\n", ", ")
         return re.sub(address_regex, replace_address, self.data)
 
 
