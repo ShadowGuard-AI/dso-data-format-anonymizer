@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # dso-data-format-anonymizer
 Anonymizes data by converting it to a different but functionally equivalent data format (e.g., converting dates to Unix timestamps, or replacing names with anonymized IDs and a lookup table). - Focused on Tools for sanitizing and obfuscating sensitive data within text files and structured data formats
 
