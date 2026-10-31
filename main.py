@@ -29,6 +29,7 @@ class DataFormatAnonymizer:
         self.format_type = format_type
         self.config = config or {}
         self.fake = Faker()
+        self.replacement_count = 0
         self.id_lookup = {} # Store mapping of original values to anonymized IDs.
         self.logger = logging.getLogger(__name__)  # Get a logger specific to this class
         self.logger.setLevel(logging.INFO)
@@ -61,10 +62,14 @@ class DataFormatAnonymizer:
     
     def date_to_timestamp(self):
         """
-        Converts dates in the data to Unix timestamps.  Assumes dates are in YYYY-MM-DD format,
-        but could be configured with config
+        Converts dates in the data to the Unix timestamp of the first
+        day of the same month and year, at midnight UTC. The day of
+        the month is dropped, so the timestamp does not decode back
+        to the exact original date. Assumes dates are in YYYY-MM-DD
+        format, but could be configured with config
         """
         date_format = self.config.get('date_format', '%Y-%m-%d')
+        self.replacement_count = 0
 
         def replace_date(match):
             date_str = match.group(0)
@@ -74,7 +79,9 @@ class DataFormatAnonymizer:
                 # on a naive datetime reads it in the host's local timezone,
                 # so the same file produced different timestamps on
                 # machines in different timezones.
-                timestamp = str(int(date_object.replace(tzinfo=timezone.utc).timestamp()))
+                month_start = date_object.replace(day=1, tzinfo=timezone.utc)
+                timestamp = str(int(month_start.timestamp()))
+                self.replacement_count += 1
                 return timestamp
             except ValueError:
                 self.logger.warning(f"Invalid date format encountered: {date_str}")  # Log invalid date format
@@ -85,21 +92,63 @@ class DataFormatAnonymizer:
 
         return re.sub(pattern, replace_date, self.data)
     
+    # Words that mark a two word pair as something other than a
+    # person name, plus common words that are never part of a name.
+    NAME_STOP_WORDS = {
+        'street', 'road', 'avenue', 'lane', 'drive', 'boulevard',
+        'court', 'place', 'terrace', 'circle', 'review', 'report',
+        'annual', 'the', 'and', 'was', 'born', 'died', 'from', 'with',
+        'this', 'that', 'there', 'here', 'then', 'than', 'into',
+        'over', 'under', 'after', 'before', 'between', 'news',
+    }
+
     def name_to_id(self):
         """
         Replaces names in the data with anonymized IDs and stores the mapping in a lookup table.
+
+        A name is two name tokens written one after the other. A token
+        is a run of letters that may carry internal hyphens or
+        apostrophes, in title case or lowercase, so forms such as
+        Anne-Marie Lee-Park, Bob O'Brien, and john smith are covered.
+        Pairs holding a stop word (for example a street suffix or a
+        common word) are left alone. Any other two word pair in name
+        shape is treated as a name, including title case pairs that
+        are not names; that limit is stated in README.md.
         """
-        def replace_name(match):
+        self.replacement_count = 0
+
+        token = r"[A-Za-z]+(?:['-][A-Za-z]+)*"
+        name_regex = self.config.get("name_regex", token + r'\s+' + token)
+        pair_re = re.compile(name_regex)
+        token_re = re.compile(token)
+
+        # Manual scan: when a candidate pair is rejected for holding a
+        # stop word, advance past its first token only, so the second
+        # token can still start a real name pair.
+        out = []
+        pos = 0
+        data = self.data
+        while pos < len(data):
+            match = pair_re.search(data, pos)
+            if match is None:
+                out.append(data[pos:])
+                break
             name = match.group(0)
+            words = re.split(r'\s+', name)
+            lowered = [w.replace('-', ' ').replace("'", ' ').lower() for w in words]
+            parts = [p for chunk in lowered for p in chunk.split()]
+            if any(p in self.NAME_STOP_WORDS for p in parts):
+                first = token_re.match(data, match.start())
+                out.append(data[pos:first.end()])
+                pos = first.end()
+                continue
             if name not in self.id_lookup:
                 self.id_lookup[name] = str(uuid.uuid4())  # Generate a UUID for the ID
-            return self.id_lookup[name]
-
-        name_regex = r'\b[A-Z][a-z]+\s[A-Z][a-z]+\b'
-        name_regex = self.config.get("name_regex", name_regex)
-
-        anonymized_data = re.sub(name_regex, replace_name, self.data)
-        return anonymized_data
+            self.replacement_count += 1
+            out.append(data[pos:match.start()])
+            out.append(self.id_lookup[name])
+            pos = match.end()
+        return ''.join(out)
     
     def email_to_fake(self):
          """Replaces email addresses with fake email addresses."""
@@ -108,7 +157,9 @@ class DataFormatAnonymizer:
          def replace_email(match):
             return self.fake.email()
 
-         return re.sub(email_regex, replace_email, self.data)
+         result, count = re.subn(email_regex, replace_email, self.data)
+         self.replacement_count = count
+         return result
 
     def phone_to_fake(self):
         """Replaces phone numbers with fake phone numbers."""
@@ -116,11 +167,21 @@ class DataFormatAnonymizer:
         phone_regex = self.config.get('phone_regex', phone_regex)
         def replace_phone(match):
             return self.fake.phone_number()
-        return re.sub(phone_regex, replace_phone, self.data)
+        result, count = re.subn(phone_regex, replace_phone, self.data)
+        self.replacement_count = count
+        return result
 
     def address_to_fake(self):
-        """Replaces addresses with fake addresses."""
-        address_regex = r'\d+\s[A-Za-z]+\s[A-Za-z]+' #Simple address regex; can be customized.
+        """Replaces addresses with fake addresses.
+
+        An address must be a house number, one or two street name
+        words, and a street suffix (Street, Road, Avenue, and the
+        other suffixes in the pattern), all on one line. Spaces in
+        the pattern are plain spaces, so a match never crosses a
+        line break, and a number followed by any two words is no
+        longer enough on its own.
+        """
+        address_regex = r'\d+ [A-Za-z]+(?: [A-Za-z]+)? (?i:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Boulevard|Blvd|Court|Ct|Place|Pl|Way|Terrace|Circle)\b' #Address shape regex; can be customized.
         address_regex = self.config.get('address_regex', address_regex)
 
         def replace_address(match):
@@ -128,7 +189,9 @@ class DataFormatAnonymizer:
             # city line. Inserted raw, one address splits the record it
             # lands in across two lines, so the lines are joined first.
             return self.fake.address().replace("\n", ", ")
-        return re.sub(address_regex, replace_address, self.data)
+        result, count = re.subn(address_regex, replace_address, self.data)
+        self.replacement_count = count
+        return result
 
 
 def detect_encoding(file_path):
@@ -194,6 +257,10 @@ def main():
     logging.getLogger().setLevel(args.log_level)
 
     try:
+        if os.path.realpath(args.output_path) == os.path.realpath(args.input_path):
+            logging.error("Refusing to run: output path resolves to the input file.")
+            exit(1)
+
         data = load_data(args.input_path)
         
         config = {}
@@ -213,6 +280,11 @@ def main():
 
         anonymizer = DataFormatAnonymizer(data, args.format_type, config)
         anonymized_data = anonymizer.anonymize()
+
+        if getattr(anonymizer, 'replacement_count', 0) == 0:
+            logging.info("No replacements made.")
+            print("No replacements made.")
+            exit(1)
 
         save_data(anonymized_data, args.output_path)
         logging.info(f"Anonymization complete.  Output written to {args.output_path}")
