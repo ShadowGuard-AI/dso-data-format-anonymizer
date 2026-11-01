@@ -89,6 +89,13 @@ class DataFormatAnonymizer:
 
         pattern = r'\d{4}-\d{2}-\d{2}' #Default regex, can be customized with config
         pattern = self.config.get('date_regex', pattern) #Override default regex if provided in config
+        # The search pattern and the parse format are configured separately,
+        # and that split can bite: setting date_format without date_regex
+        # changes how matches are parsed but not which text is matched, so
+        # dates written the new way are never found. When a format carries
+        # a time of day, replace(day=1) also keeps that time, so the result
+        # is the first of the month at the original clock time, not the
+        # midnight the docstring above describes.
 
         return re.sub(pattern, replace_date, self.data)
     
@@ -142,6 +149,10 @@ class DataFormatAnonymizer:
                 out.append(data[pos:first.end()])
                 pos = first.end()
                 continue
+            # The lookup key is the exact matched string, case included, so
+            # John Smith and john smith are two identities here and take
+            # two different IDs. Consistency holds inside one run of one
+            # instance; nothing carries an ID from one file to the next.
             if name not in self.id_lookup:
                 self.id_lookup[name] = str(uuid.uuid4())  # Generate a UUID for the ID
             self.replacement_count += 1
@@ -223,6 +234,9 @@ def save_data(data, output_path):
     Saves data to a file.
     """
     try:
+        # Input is read in whatever encoding chardet guessed; output is
+        # always utf-8. A file that came in as something else is therefore
+        # re-encoded as well as anonymized, with no note in the log.
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(data)
     except Exception as e:
@@ -290,6 +304,12 @@ def main():
         logging.info(f"Anonymization complete.  Output written to {args.output_path}")
         
         if args.format_type == 'name_to_id' and anonymizer.id_lookup:
+            # This file is the reversal key for the whole run: every
+            # original name beside its ID, written next to the output under
+            # a name anyone can guess from the output path. Whoever keeps
+            # the two files together has anonymized nothing, which is the
+            # point of a lookup and also its risk, so it belongs in plain
+            # sight here.
             lookup_file = os.path.splitext(args.output_path)[0] + '_lookup.json' #Lookup table saved to same base name.
             try:
                 with open(lookup_file, 'w', encoding='utf-8') as f:
